@@ -2,7 +2,11 @@ import Workspace.lexer;
 import Workspace.zbc;
 
 ##
- * zsi — interpreter Z#. Obecny stan: launcher/pakowacz nad stage0 (pełna semantyka języka), bez własnej VM.
+ * zsi — interpreter Z# (M6). Warstwy wykonania:
+ *   1. stage0 z VM bajtkodową (tier 1: funkcje ze slotami zmiennych; `ZS_VM=0` wyłącza) — pełna semantyka języka,
+ *   2. `--jit`: kompilacja całego programu do kodu natywnego (zsc → C/LLVM → cc) z trwałym cache (`~/.cache/zsi`, klucz = treść
+ *      źródeł); kolejne uruchomienia startują natychmiast z gotowej binarki. Program poza podzbiorem natywnym (albo brak zsc/cc)
+ *      działa dalej w warstwie 1 (znacznik `.fail` w cache zapobiega ponawianiu kompilacji).
  *   zsi plik.zs [arg...]        uruchom źródło lub pakiet .zbc
  *   zsi -e 'kod' [arg...]       uruchom fragment
  *   zsi --compile plik.zs -o x  samodzielna binarka (runtime + pakiet .zbc; bez źródeł i bez zsc0 u odbiorcy)
@@ -10,11 +14,13 @@ import Workspace.zbc;
  *   zsi --check plik.zs         tylko składnia;  --tokens plik.zs — zrzut tokenów
 ##
 
-func version(): string { return "zsi 0.0.1 (launcher/packager -> stage0; bytecode VM: todo)"; }
+func version(): string { return "zsi 0.0.1 (stage0 + VM bajtkodowa; --jit: natywny cache)"; }
 
 func usage(): void {
     echo "użycie:";
     echo "  zsi <plik.zs|plik.zbc> [argumenty...]";
+    echo "  zsi --jit <plik.zs> [argumenty...]       kompilacja natywna z cache (fallback: VM)";
+    echo "  zsi --clean-cache                        czyści cache JIT";
     echo "  zsi -e <kod> [argumenty...]";
     echo "  zsi --compile <plik.zs> -o <binarka>     samodzielna binarka";
     echo "  zsi --emit-zbc <plik.zs> -o <plik.zbc>   przenośny pakiet";
@@ -46,6 +52,73 @@ func run0($pre, $argv): int {
     foreach ($s[1] as $p) { $full[] = $p; }
     foreach ($argv as $a) { $full[] = $a; }
     return Process.exec($s[0], $full);
+}
+
+# ── --jit: natywna kompilacja z cache ──
+func hex32($h): string {
+    $d = "0123456789abcdef";
+    $o = "";
+    for ($i = 0; $i < 8; $i++) { $o = substr($d, $h & 15, 1) . $o; $h = $h >> 4; }
+    return $o;
+}
+
+func fnv(string $s, $seed): string {
+    $h = $seed;
+    $n = strlen($s);
+    for ($i = 0; $i < $n; $i++) { $h = (($h ^ ord(substr($s, $i, 1))) * 16777619) & 4294967295; }
+    return hex32($h);
+}
+
+# klucz = skrót treści wszystkich źródeł .zs/.zsharp w katalogu programu (importy względne) + zsc
+func sourceKey(string $file): string {
+    $dir = System.dirname($file);
+    $acc = File.read($file);
+    $names = Directory.list($dir);
+    sort($names);
+    foreach ($names as $n) {
+        if ((ends_with($n, ".zs") || ends_with($n, ".zsharp")) && $dir . "/" . $n !== $file) {
+            $acc .= "\0" . $n . "\0" . File.read($dir . "/" . $n);
+        }
+    }
+    return fnv($acc, 2166136261) . fnv($acc, 40503) . "-" . strlen($acc);
+}
+
+func cacheDir(): string {
+    $x = System.env("ZSI_CACHE");
+    if ($x !== null && $x !== "") { return $x; }
+    $h = System.env("XDG_CACHE_HOME");
+    if ($h === null || $h === "") { $h = (System.env("HOME") ?? "/tmp") . "/.cache"; }
+    return $h . "/zsi";
+}
+
+func jit(string $file, $rest): int {
+    $dir = cacheDir();
+    Directory.create($dir);
+    $key = sourceKey($file);
+    $bin = $dir . "/" . $key;
+    if (!File.exists($bin) && !File.exists($bin . ".fail")) {
+        $zsc = System.env("ZSC") ?? "zsc";
+        $r = null;
+        try { $r = Process.run($zsc, ["build", $file, "-o", $bin . ".tmp"]); } catch (Exception $e) { $r = null; }
+        if ($r !== null && $r["status"] === 0 && File.exists($bin . ".tmp")) { File.rename($bin . ".tmp", $bin); File.chmod($bin, 493); }
+        else {
+            File.write($bin . ".fail", $r === null ? "brak zsc" : $r["stderr"]);
+            if (File.exists($bin . ".tmp")) { File.delete($bin . ".tmp"); }
+            eecho("zsi: --jit: kompilacja natywna niedostępna, uruchamiam w VM (" . $bin . ".fail)");
+        }
+    }
+    if (File.exists($bin)) { return Process.exec($bin, $rest); }
+    $argv = ["run", $file];
+    foreach ($rest as $a) { $argv[] = $a; }
+    return run0([], $argv);
+}
+
+func cleanCache(): int {
+    $dir = cacheDir();
+    if (!Directory.exists($dir)) { return 0; }
+    foreach (Directory.list($dir) as $n) { File.delete($dir . "/" . $n); }
+    echo "zsi: wyczyszczono " . $dir;
+    return 0;
 }
 
 func dumpTokens(string $file): int {
@@ -82,6 +155,8 @@ func main(): int {
         if ($a === "--version") { echo version(); return 0; }
         else if ($a === "--help" || $a === "-h") { usage(); return 0; }
         else if ($a === "--tokens") { $mode = "tokens"; }
+        else if ($a === "--jit") { $mode = "jit"; }
+        else if ($a === "--clean-cache") { return cleanCache(); }
         else if ($a === "--check") { $mode = "check"; }
         else if ($a === "--compile") { $mode = "compile"; }
         else if ($a === "--emit-zbc") { $mode = "zbc"; }
@@ -105,6 +180,11 @@ func main(): int {
     if (!File.exists($file)) { eecho("zsi: nie znaleziono pliku " . $file); return 1; }
     if (($mode === "compile" || $mode === "zbc") && $out === null) {
         for ($j = $i + 1; $j + 1 < count($args); $j++) { if ($args[$j] === "-o") { $out = $args[$j + 1]; } }
+    }
+    if ($mode === "jit") {
+        $rest = [];
+        for ($j = $i + 1; $j < count($args); $j++) { $rest[] = $args[$j]; }
+        return jit($file, $rest);
     }
     if ($mode === "tokens") { return dumpTokens($file); }
     if ($mode === "check") { return run0([], ["check", $file]); }
