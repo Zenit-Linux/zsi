@@ -1,0 +1,22 @@
+#!/bin/bash
+# Testy zsi (launcher natywny z cache). Wymaga zsi i zsc w PATH (lub ZSI, ZSC), Z-Sharp obok.
+HERE=$(cd "$(dirname "$0")" && pwd); ZS=${ZS_HOME:-$HERE/../Z-Sharp}; export ZS_HOME=$ZS
+ZSI=${ZSI:-zsi}; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; export ZSI_CACHE=$T/cache; fail=0
+ok() { echo "ok   $1"; }; bad() { echo "FAIL $1"; fail=1; }
+echo 'echo "a", 1 + 2;' > $T/p.zs
+[ "$($ZSI $T/p.zs)" = "a 3" ] && ok run || bad run
+[ "$(ls $ZSI_CACHE | grep -vc tmp)" = 1 ] && ok "cache: 1 wpis" || bad "cache: 1 wpis"
+$ZSI $T/p.zs >/dev/null; [ "$(ls $ZSI_CACHE | grep -vc tmp)" = 1 ] && ok "cache: trafienie" || bad "cache: trafienie"
+echo 'echo "b";' > $T/p.zs; [ "$($ZSI $T/p.zs)" = "b" ] && [ "$(ls $ZSI_CACHE | grep -vc tmp)" = 2 ] && ok "cache: zmiana źródła" || bad "cache: zmiana źródła"
+[ "$($ZSI --no-cache $T/p.zs)" = "b" ] && ok "--no-cache" || bad "--no-cache"
+[ "$($ZSI -e 'echo 6 * 7;')" = "42" ] && ok "-e" || bad "-e"
+printf 'echo System.args()[0], System.args()[1], count(System.args());\n' > $T/a.zs
+[ "$($ZSI $T/a.zs x)" = "$T/a.zs x 2" ] && ok "args[0] = skrypt" || bad "args[0] = skrypt"
+echo 'exit(9);' > $T/x.zs; $ZSI $T/x.zs; [ $? = 9 ] && ok "kod wyjścia" || bad "kod wyjścia"
+echo 'echo $nope;' > $T/u.zs; $ZSI $T/u.zs >/dev/null 2>&1; [ $? = 1 ] && ok "błąd wykonania => 1" || bad "błąd wykonania => 1"
+echo 'function (' > $T/s.zs; $ZSI $T/s.zs >/dev/null 2>&1; [ $? = 1 ] && ok "błąd składni => 1" || bad "błąd składni => 1"
+$ZSI --check $T/p.zs >/dev/null 2>&1 && ok "--check" || bad "--check"
+$ZSI --compile $T/p.zs -o $T/bin >/dev/null 2>&1 && [ "$($T/bin)" = "b" ] && ok "--compile" || bad "--compile"
+$ZSI --clean-cache >/dev/null; [ -z "$(ls $ZSI_CACHE)" ] && ok "--clean-cache" || bad "--clean-cache"
+"$ZS/tests/run_conformance.sh" zsi | tail -1 | grep -q " 0 błędów" && ok conformance || bad conformance
+exit $fail
