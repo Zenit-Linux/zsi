@@ -1,17 +1,18 @@
-# zsi — interpreter Z# (0.0.1)
+# zsi — uruchamianie Z# (bez stage0)
 
-**Stan: launcher + pakowacz nad stage0** (pełna semantyka języka). Własna VM bajtkodowa i JIT: **nie zrobione** (ścieżka niżej).
+`zsi prog.zs [argumenty]` kompiluje program natywnie przez `zsc` (LLVM >= 21), zapisuje binarkę w cache i ją uruchamia.
+Kolejne uruchomienia bez zmian źródeł trwają milisekundy. Działa także jako `#!/usr/bin/env zsi`.
 
 ```
-zsi plik.zs [arg...]          # uruchom źródło lub pakiet .zbc (shebang: #!/usr/bin/env zsi)
-zsi -e 'echo 1 + 1;'          # fragment
-zsi --compile plik.zs -o app  # samodzielna binarka (runtime + .zbc, bez źródeł i bez zsc0 u odbiorcy)
-zsi --emit-zbc plik.zs -o x.zbc
-zsi --check plik.zs | --tokens plik.zs | --version
+zsi prog.zs a b          # args()[0] = prog.zs (jak w interpreterze)
+zsi -e 'echo 6 * 7;'
+zsi --check prog.zs      # składnia + sema + zgodność z backendem natywnym
+zsi --compile prog.zs -o prog
+zsi --emit-zbc prog.zs -o prog.zbc
+zsi --no-cache | --clean-cache | --cache-dir | --legacy | --zsc <ścieżka>
 ```
-Stage0: `ZSC0`, potem `zsc0` z PATH, a w trybie standalone ta sama binarka (`ZS_NO_EMBEDDED=1`) — `zsi` zbudowany przez `zsc0 bundle` działa bez zainstalowanego zsc0.
 
-## Droga do VM/JIT
-1. `lib/bytecode.zsharp`: AST → bajtkod stosowy (opkody, tablica stałych/funkcji/klas, tablica linii) + format `.zbx`.
-2. `lib/vm.zsharp` → docelowo VM w C na `runtime/native/zs_rt.c` (wartości/tablice/wyjątki już są), testy różnicowe vs stage0 (`zsc/tests/native` rozszerzone o pełny język).
-3. JIT: emisja LLVM IR w locie (`emit_llvm`) + ORC; wymaga klas/domknięć w runtime natywnym.
+Klucz cache: źródła programu i jego katalogu + wersja i stempel `zsc`. Cache: `ZSI_CACHE` lub `~/.cache/zsi`.
+`zsc` znajdowany jest przez `--zsc`, `ZSC`, obok binarki `zsi`, potem `PATH`. Kody: kod programu; 1 błąd kompilacji/pliku/wykonania; 2 użycie; 3 brak zsc/LLVM.
+Brak własnej VM: konstrukcje spoza podzbioru natywnego zgłaszane są jako błąd kompilacji. `--legacy` (i pliki `.zbc`) uruchamiają stage0 (`ZSC0`) — tylko zgodność wsteczna.
+Testy: `tests/run.sh`.
